@@ -3,3 +3,6 @@ djangorestframework==3.16.1
 psycopg[binary]==3.2.10
 python-dotenv==1.1.1
 livekit-api
+dj-database-url
+whitenoise
+gunicorn
