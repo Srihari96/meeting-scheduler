@@ -1,0 +1,70 @@
+{% extends "users/base.html" %}
+{% block title %}Register · Meetly{% endblock %}
+{% block content %}
+<section class="auth-shell">
+  <div class="auth-card wide">
+    <p class="eyebrow">Get started</p>
+    <h1>Create your account</h1>
+    <p class="muted">Your timezone controls how meeting times appear.</p>
+    <div id="register-message" class="alert hidden" role="alert"></div>
+    <form id="register-form" class="stack-form">
+      {% csrf_token %}
+      <div class="form-grid">
+        <label>Username<input name="username" required autocomplete="username"></label>
+        <label>Email<input name="email" type="email" autocomplete="email"></label>
+        <label>First name<input name="first_name" autocomplete="given-name"></label>
+        <label>Last name<input name="last_name" autocomplete="family-name"></label>
+        <label>Timezone
+          <select name="preferred_timezone" required>
+            {% for value, label in timezone_choices %}
+              <option value="{{ value }}"{% if value == "Asia/Kolkata" %} selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>Minimum notice (minutes)<input name="minimum_notice_minutes" type="number" min="0" value="30" required></label>
+      </div>
+      <label>Password<input name="password" type="password" minlength="8" required autocomplete="new-password"></label>
+      <button class="primary-button" type="submit">Create account</button>
+    </form>
+    <p class="auth-switch">Already registered? <a href="{% url 'login' %}">Log in</a></p>
+  </div>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+const form = document.getElementById("register-form");
+const message = document.getElementById("register-message");
+
+function showMessage(text, kind = "error") {
+  message.textContent = text;
+  message.className = `alert ${kind}`;
+}
+
+function errorText(data) {
+  return Object.entries(data).map(([field, errors]) => `${field}: ${Array.isArray(errors) ? errors.join(" ") : errors}`).join(" ");
+}
+
+form.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = form.querySelector("button");
+  button.disabled = true;
+  const values = Object.fromEntries(new FormData(form));
+  values.minimum_notice_minutes = Number(values.minimum_notice_minutes);
+  delete values.csrfmiddlewaretoken;
+  try {
+    const response = await fetch("/api/register/", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(values)
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(errorText(data));
+    showMessage("Account created. Redirecting to login…", "success");
+    setTimeout(() => window.location.assign("{% url 'login' %}"), 700);
+  } catch (error) {
+    showMessage(error.message || "Registration failed.");
+    button.disabled = false;
+  }
+});
+</script>
+{% endblock %}

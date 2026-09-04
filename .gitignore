@@ -1,0 +1,29 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Django
+staticfiles/
+media/
+*.log
+
+# Tests and coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE and OS
+.DS_Store
+.idea/
+.vscode/

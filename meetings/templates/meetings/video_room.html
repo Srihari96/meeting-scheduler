@@ -1,0 +1,599 @@
+{% extends "users/base.html" %}
+
+{% block title %}
+{{ meeting.title }} · Video call
+{% endblock %}
+
+{% block content %}
+<section class="video-room-shell">
+    <div class="video-room-header">
+        <div>
+            <p class="eyebrow">Video meeting</p>
+            <h1>{{ meeting.title }}</h1>
+
+            <p class="muted">
+                {{ meeting.organizer.username }}
+                and
+                {{ meeting.invitee.username }}
+            </p>
+        </div>
+
+        <a href="{% url 'dashboard' %}" class="secondary-button button-link">
+            Back to meetings
+        </a>
+    </div>
+
+    {% csrf_token %}
+
+    <div id="call-message" class="alert hidden" role="alert"></div>
+
+    <div id="prejoin-panel" class="prejoin-panel">
+        <div class="camera-preview">
+            <div class="camera-placeholder">
+                Your camera will appear here
+            </div>
+
+            <video id="local-video" autoplay muted playsinline></video>
+        </div>
+
+        <div class="prejoin-details">
+            <h2>Ready to join?</h2>
+
+            <p class="muted">
+                Your browser will ask for camera and microphone
+                permission.
+            </p>
+
+            <button id="join-call" class="primary-button">
+                Join call
+            </button>
+        </div>
+    </div>
+
+    <div id="active-call" class="active-call hidden">
+        <div id="waiting-message" class="waiting-message">
+            <span class="waiting-pulse"></span>
+
+            Waiting for the other participant to join…
+        </div>
+        <div id="participant-grid" class="participant-grid">
+            <article class="participant-tile">
+                <video id="active-local-video" autoplay muted playsinline></video>
+
+                <span class="participant-label">
+                    You
+                </span>
+
+                <div id="local-media-state" class="media-state">
+                    <span class="state-badge">Mic on</span>
+                    <span class="state-badge">Camera on</span>
+                </div>
+            </article>
+
+            <div id="remote-participants" class="remote-participants"></div>
+        </div>
+
+        <div class="call-controls">
+            <button id="toggle-microphone" class="control-button" type="button">
+                Mute
+            </button>
+
+            <button id="toggle-camera" class="control-button" type="button">
+                Camera off
+            </button>
+
+            <button id="leave-call" class="control-button leave" type="button">
+                Leave call
+            </button>
+        </div>
+    </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>
+
+<script>
+    const {
+        Room,
+        RoomEvent,
+        Track,
+        VideoPresets,
+    } = LivekitClient;
+
+    const meetingId = {{ meeting.id }};
+
+    const joinButton = document.getElementById("join-call");
+    const leaveButton = document.getElementById("leave-call");
+    const cameraButton = document.getElementById("toggle-camera");
+    const microphoneButton = document.getElementById("toggle-microphone");
+
+    const prejoinPanel = document.getElementById("prejoin-panel");
+    const activeCall = document.getElementById("active-call");
+    const message = document.getElementById("call-message");
+    const localVideo = document.getElementById("active-local-video");
+    const remoteParticipants = document.getElementById(
+        "remote-participants"
+    );
+
+    let room = null;
+    let cameraEnabled = true;
+    let microphoneEnabled = true;
+
+    function csrfToken() {
+        return document.querySelector(
+            "[name=csrfmiddlewaretoken]"
+        ).value;
+    }
+
+    function showMessage(text, kind = "error") {
+        message.textContent = text;
+        message.className = `alert ${kind}`;
+    }
+
+    function clearMessage() {
+        message.textContent = "";
+        message.className = "alert hidden";
+    }
+
+    function apiError(data) {
+        if (typeof data === "string") {
+            return data;
+        }
+
+        return Object.values(data)
+            .flat()
+            .join(" ");
+    }
+    const waitingMessage = document.getElementById(
+        "waiting-message"
+    );
+
+    const localMediaState = document.getElementById(
+        "local-media-state"
+    );
+    function participantTile(participant) {
+        let tile = document.getElementById(
+            `participant-${participant.sid}`
+        );
+
+        if (tile) {
+            return tile;
+        }
+
+        tile = document.createElement("article");
+        tile.id = `participant-${participant.sid}`;
+        tile.className = "participant-tile";
+
+        const placeholder = document.createElement("div");
+        placeholder.className = "participant-placeholder";
+        placeholder.textContent = (
+            participant.name ||
+            participant.identity ||
+            "Participant"
+        )
+            .charAt(0)
+            .toUpperCase();
+
+        const label = document.createElement("span");
+        label.className = "participant-label";
+        label.textContent =
+            participant.name ||
+            participant.identity ||
+            "Participant";
+
+        const mediaState = document.createElement("div");
+        mediaState.className = "media-state";
+        mediaState.dataset.participantState = participant.sid;
+
+        tile.appendChild(placeholder);
+        tile.appendChild(label);
+        tile.appendChild(mediaState);
+
+        remoteParticipants.appendChild(tile);
+
+        updateRemoteMediaState(participant);
+
+        return tile;
+    }
+
+    function updateWaitingState() {
+        if (!room) {
+            waitingMessage.classList.remove("hidden");
+            return;
+        }
+
+        const hasRemoteParticipant =
+            room.remoteParticipants.size > 0;
+
+        waitingMessage.classList.toggle(
+            "hidden",
+            hasRemoteParticipant
+        );
+    }
+
+    function updateLocalMediaState() {
+        const microphoneLabel = microphoneEnabled
+            ? "Mic on"
+            : "Muted";
+
+        const cameraLabel = cameraEnabled
+            ? "Camera on"
+            : "Camera off";
+
+        localMediaState.innerHTML = "";
+
+        const microphoneBadge =
+            document.createElement("span");
+
+        microphoneBadge.className = microphoneEnabled
+            ? "state-badge"
+            : "state-badge disabled";
+
+        microphoneBadge.textContent = microphoneLabel;
+
+        const cameraBadge =
+            document.createElement("span");
+
+        cameraBadge.className = cameraEnabled
+            ? "state-badge"
+            : "state-badge disabled";
+
+        cameraBadge.textContent = cameraLabel;
+
+        localMediaState.append(
+            microphoneBadge,
+            cameraBadge
+        );
+    }
+
+    function updateRemoteMediaState(participant) {
+        const stateElement = document.querySelector(
+            `[data-participant-state="${participant.sid}"]`
+        );
+
+        if (!stateElement) {
+            return;
+        }
+
+        const microphonePublication =
+            participant.getTrackPublication(
+                Track.Source.Microphone
+            );
+
+        const cameraPublication =
+            participant.getTrackPublication(
+                Track.Source.Camera
+            );
+
+        const microphoneMuted =
+            !microphonePublication ||
+            microphonePublication.isMuted;
+
+        const cameraOff =
+            !cameraPublication ||
+            cameraPublication.isMuted;
+
+        stateElement.innerHTML = "";
+
+        const microphoneBadge =
+            document.createElement("span");
+
+        microphoneBadge.className = microphoneMuted
+            ? "state-badge disabled"
+            : "state-badge";
+
+        microphoneBadge.textContent = microphoneMuted
+            ? "Muted"
+            : "Mic on";
+
+        const cameraBadge =
+            document.createElement("span");
+
+        cameraBadge.className = cameraOff
+            ? "state-badge disabled"
+            : "state-badge";
+
+        cameraBadge.textContent = cameraOff
+            ? "Camera off"
+            : "Camera on";
+
+        stateElement.append(
+            microphoneBadge,
+            cameraBadge
+        );
+    }
+
+    function attachRemoteTrack(
+        track,
+        publication,
+        participant
+    ) {
+        const tile = participantTile(participant);
+        const element = track.attach();
+
+        if (track.kind === Track.Kind.Video) {
+            element.classList.add("participant-video");
+
+            const existingVideo = tile.querySelector(
+                ".participant-video"
+            );
+
+            existingVideo?.remove();
+
+            tile.insertBefore(
+                element,
+                tile.firstChild
+            );
+        } else if (track.kind === Track.Kind.Audio) {
+            element.classList.add("participant-audio");
+            document.body.appendChild(element);
+        }
+
+        updateRemoteMediaState(participant);
+    }
+    function detachRemoteTrack(track) {
+        track.detach().forEach((element) => element.remove());
+    }
+
+    async function attachLocalCamera() {
+        const publication =
+            room.localParticipant.getTrackPublication(
+                Track.Source.Camera
+            );
+
+        if (publication?.track) {
+            publication.track.attach(localVideo);
+        }
+    }
+    async function joinCall() {
+        clearMessage();
+
+        joinButton.disabled = true;
+        joinButton.textContent = "Joining…";
+
+        try {
+            const tokenResponse = await fetch(
+                `/api/meetings/${meetingId}/video-token/`,
+                {
+                    method: "POST",
+                    credentials: "same-origin",
+                    headers: {
+                        "X-CSRFToken": csrfToken(),
+                        "Content-Type": "application/json",
+                    },
+                }
+            );
+
+            const responseBody = await tokenResponse.text();
+
+            let credentials;
+
+            try {
+                credentials = JSON.parse(responseBody);
+            } catch {
+                throw new Error(
+                    `Token endpoint returned HTTP ${tokenResponse.status} ` +
+                    "instead of JSON. Check the Django server output."
+                );
+            }
+
+            if (!tokenResponse.ok) {
+                throw new Error(
+                    apiError(credentials) ||
+                    `Token request failed with HTTP ${tokenResponse.status}.`
+                );
+            }
+
+            room = new Room({
+                adaptiveStream: true,
+                dynacast: true,
+                videoCaptureDefaults: {
+                    resolution: VideoPresets.h720.resolution,
+                },
+            });
+
+            room
+                .on(
+                    RoomEvent.TrackSubscribed,
+                    attachRemoteTrack
+                )
+                .on(
+                    RoomEvent.TrackUnsubscribed,
+                    (
+                        track,
+                        publication,
+                        participant
+                    ) => {
+                        detachRemoteTrack(track);
+                        updateRemoteMediaState(participant);
+                    }
+                )
+                .on(
+                    RoomEvent.TrackMuted,
+                    (
+                        publication,
+                        participant
+                    ) => {
+                        updateRemoteMediaState(participant);
+                    }
+                )
+                .on(
+                    RoomEvent.TrackUnmuted,
+                    (
+                        publication,
+                        participant
+                    ) => {
+                        updateRemoteMediaState(participant);
+                    }
+                )
+                .on(
+                    RoomEvent.TrackPublished,
+                    (
+                        publication,
+                        participant
+                    ) => {
+                        participantTile(participant);
+                        updateRemoteMediaState(participant);
+                    }
+                )
+                .on(
+                    RoomEvent.TrackUnpublished,
+                    (
+                        publication,
+                        participant
+                    ) => {
+                        updateRemoteMediaState(participant);
+                    }
+                )
+                .on(
+                    RoomEvent.ParticipantConnected,
+                    (participant) => {
+                        participantTile(participant);
+                        updateWaitingState();
+                    }
+                )
+                .on(
+                    RoomEvent.ParticipantDisconnected,
+                    (participant) => {
+                        document
+                            .getElementById(
+                                `participant-${participant.sid}`
+                            )
+                            ?.remove();
+
+                        updateWaitingState();
+                    }
+                )
+                .on(
+                    RoomEvent.Disconnected,
+                    handleDisconnected
+                )
+                .on(
+                    RoomEvent.MediaDevicesError,
+                    (error) => {
+                        showMessage(
+                            `Camera or microphone error: ${error.message}`
+                        );
+                    }
+                );
+            await room.connect(
+                credentials.server_url,
+                credentials.participant_token
+            );
+            room.remoteParticipants.forEach(
+                (participant) => {
+                    participantTile(participant);
+                }
+            );
+
+            updateWaitingState();
+
+            await room.localParticipant.setCameraEnabled(true);
+            await room.localParticipant.setMicrophoneEnabled(true);
+
+            await attachLocalCamera();
+
+            // Reset the button before hiding the prejoin screen.
+            joinButton.disabled = false;
+            joinButton.textContent = "Join call";
+            updateLocalMediaState();
+
+            prejoinPanel.classList.add("hidden");
+            activeCall.classList.remove("hidden");
+        } catch (error) {
+            showMessage(
+                error.message || "Could not join the call."
+            );
+
+            joinButton.disabled = false;
+            joinButton.textContent = "Join call";
+
+            if (room) {
+                await room.disconnect();
+                room = null;
+            }
+        }
+    }
+
+    async function toggleCamera() {
+        if (!room) {
+            return;
+        }
+
+        try {
+            cameraEnabled = !cameraEnabled;
+
+            await room.localParticipant.setCameraEnabled(
+                cameraEnabled
+            );
+
+            cameraButton.textContent = cameraEnabled
+                ? "Camera off"
+                : "Camera on";
+
+            updateLocalMediaState();
+        } catch (error) {
+            cameraEnabled = !cameraEnabled;
+
+            showMessage(
+                error.message ||
+                "Could not change the camera state."
+            );
+
+            updateLocalMediaState();
+        }
+    }
+    async function toggleMicrophone() {
+        if (!room) {
+            return;
+        }
+
+        try {
+            microphoneEnabled = !microphoneEnabled;
+
+            await room.localParticipant.setMicrophoneEnabled(
+                microphoneEnabled
+            );
+
+            microphoneButton.textContent = microphoneEnabled
+                ? "Mute"
+                : "Unmute";
+
+            updateLocalMediaState();
+        } catch (error) {
+            microphoneEnabled = !microphoneEnabled;
+
+            showMessage(
+                error.message ||
+                "Could not change the microphone state."
+            );
+
+            updateLocalMediaState();
+        }
+    }
+    function handleDisconnected() {
+        window.location.assign("/");
+    }
+
+    async function leaveCall() {
+        if (room) {
+            await room.disconnect();
+        }
+
+        window.location.assign("/");
+    }
+
+    joinButton.addEventListener("click", joinCall);
+    cameraButton.addEventListener("click", toggleCamera);
+    microphoneButton.addEventListener(
+        "click",
+        toggleMicrophone
+    );
+    leaveButton.addEventListener("click", leaveCall);
+
+    window.addEventListener("beforeunload", () => {
+        room?.disconnect();
+    });
+</script>
+{% endblock %}

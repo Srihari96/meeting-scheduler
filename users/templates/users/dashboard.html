@@ -1,0 +1,198 @@
+{% extends "users/base.html" %}
+{% block title %}My meetings · Meetly{% endblock %}
+{% block content %}
+<section class="dashboard-shell">
+  <div class="hero-row">
+    <div>
+      <p class="eyebrow">Your calendar</p>
+      <h1>Meetings</h1>
+      <p class="muted">Times are displayed in <strong>{{ request.user.preferred_timezone }}</strong>.</p>
+    </div>
+    <button id="open-create" class="primary-button">Schedule meeting</button>
+  </div>
+
+  <div class="tabs" role="tablist" aria-label="Meeting status">
+    <button class="tab active" data-filter="all">
+      All
+    </button>
+
+    <button class="tab" data-filter="scheduled">
+      Scheduled
+    </button>
+
+    <button class="tab" data-filter="completed">
+      Completed
+    </button>
+
+    <button class="tab" data-filter="cancelled">
+      Cancelled
+    </button>
+  </div>
+  <div id="page-message" class="alert hidden" role="alert"></div>
+  <div id="meeting-list" class="meeting-list" aria-live="polite"><div class="empty-state">Loading meetings…</div></div>
+</section>
+
+<dialog id="meeting-dialog">
+  <form id="meeting-form" class="stack-form">
+    {% csrf_token %}
+    <div class="dialog-heading"><div><p class="eyebrow">New meeting</p><h2>Schedule time</h2></div><button id="close-dialog" class="icon-button" type="button" aria-label="Close">×</button></div>
+    <div id="form-message" class="alert hidden" role="alert"></div>
+    <label>Title<input name="title" maxlength="200" required></label>
+    <label>Description<textarea name="description" rows="3"></textarea></label>
+    <label>Invitee<select name="invitee_id" id="invitee" required><option value="">Loading users…</option></select></label>
+    <div class="form-grid">
+      <label>Starts at<input name="start_time_local" type="datetime-local" required></label>
+      <label>Ends at<input name="end_time_local" type="datetime-local" required></label>
+    </div>
+    <input name="input_timezone" type="hidden" value="{{ request.user.preferred_timezone }}">
+    <button class="primary-button" type="submit">Create meeting</button>
+  </form>
+</dialog>
+{% endblock %}
+{% block scripts %}
+<script>
+const state = {meetings: [], filter: "all"};
+const list = document.getElementById("meeting-list");
+const dialog = document.getElementById("meeting-dialog");
+const meetingForm = document.getElementById("meeting-form");
+const formMessage = document.getElementById("form-message");
+const pageMessage = document.getElementById("page-message");
+const preferredTimezone = "{{ request.user.preferred_timezone|escapejs }}";
+const dateFormatter = new Intl.DateTimeFormat(undefined, {dateStyle: "medium", timeZone: preferredTimezone});
+const dateTimeFormatter = new Intl.DateTimeFormat(undefined, {dateStyle: "medium", timeStyle: "short", timeZone: preferredTimezone});
+const timeFormatter = new Intl.DateTimeFormat(undefined, {hour: "2-digit", minute: "2-digit", timeZone: preferredTimezone});
+
+function csrfToken() {
+  return document.querySelector("[name=csrfmiddlewaretoken]").value;
+}
+
+function escapeHtml(value) {
+  const node = document.createElement("div");
+  node.textContent = value ?? "";
+  return node.innerHTML;
+}
+
+function apiErrors(data) {
+  return Object.values(data).flat().join(" ");
+}
+
+async function api(url, options = {}) {
+  const response = await fetch(url, {credentials: "same-origin", ...options});
+  const data = await response.json();
+  if (!response.ok) throw new Error(apiErrors(data) || "Request failed.");
+  return data;
+}
+
+function formatDate(value) {
+  return dateTimeFormatter.format(new Date(value));
+}
+
+function renderMeetings() {
+  const filtered = state.meetings.filter(item => state.filter === "all" || item.status === state.filter);
+  if (!filtered.length) {
+    list.innerHTML = '<div class="empty-state">No meetings in this category.</div>';
+    return;
+  }
+  list.innerHTML = filtered.map(meeting => {
+    const other = meeting.organizer.id === {{ request.user.id }} ? meeting.invitee : meeting.organizer;
+    const canCancel = meeting.organizer.id === {{ request.user.id }} && meeting.status === "scheduled";
+    const canJoin = meeting.can_join_video;
+    return `<article class="meeting-card ${meeting.status}">
+      <div class="date-tile"><span>${dateFormatter.format(new Date(meeting.starts_at_local))}</span><strong>${timeFormatter.format(new Date(meeting.starts_at_local))}</strong></div>
+      <div class="meeting-main"><div class="meeting-title-row"><h2>${escapeHtml(meeting.title)}</h2><span class="status-badge">${meeting.status}</span></div>
+      <p>${escapeHtml(meeting.description) || "No description"}</p><small>With ${escapeHtml(other.first_name || other.username)} · Ends ${formatDate(meeting.ends_at_local)}</small></div>
+      <div class="meeting-actions">
+      ${
+        canJoin
+          ? `<a
+              class="primary-button button-link"
+              href="/meetings/${meeting.id}/call/"
+            >
+              Join call
+            </a>`
+          : ""
+      }
+
+      ${
+        canCancel
+          ? `<button
+              class="danger-button"
+              data-cancel="${meeting.id}"
+            >
+              Cancel
+            </button>`
+          : ""
+      }
+    </div>
+    </article>`;
+  }).join("");
+}
+
+async function loadMeetings() {
+  try {
+    const data = await api("/api/meetings/");
+    state.meetings = data.results || data;
+    renderMeetings();
+  } catch (error) {
+    list.innerHTML = `<div class="alert error">${escapeHtml(error.message)}</div>`;
+  }
+}
+
+async function loadUsers() {
+  const select = document.getElementById("invitee");
+  try {
+    const data = await api("/api/users/");
+    const users = data.results || data;
+    select.innerHTML = '<option value="">Select an invitee</option>' + users.map(user => `<option value="${user.id}">${escapeHtml(user.first_name || user.username)} (${escapeHtml(user.username)}) · ${user.minimum_notice_minutes} min notice</option>`).join("");
+  } catch (error) {
+    select.innerHTML = '<option value="">Could not load users</option>';
+  }
+}
+
+document.querySelectorAll(".tab").forEach(tab => tab.addEventListener("click", () => {
+  document.querySelectorAll(".tab").forEach(item => item.classList.remove("active"));
+  tab.classList.add("active");
+  state.filter = tab.dataset.filter;
+  renderMeetings();
+}));
+
+document.getElementById("open-create").addEventListener("click", () => dialog.showModal());
+document.getElementById("close-dialog").addEventListener("click", () => dialog.close());
+
+meetingForm.addEventListener("submit", async event => {
+  event.preventDefault();
+  formMessage.className = "alert hidden";
+  const values = Object.fromEntries(new FormData(meetingForm));
+  delete values.csrfmiddlewaretoken;
+  values.invitee_id = Number(values.invitee_id);
+  try {
+    await api("/api/meetings/", {method: "POST", headers: {"Content-Type": "application/json", "X-CSRFToken": csrfToken()}, body: JSON.stringify(values)});
+    meetingForm.reset();
+    dialog.close();
+    pageMessage.textContent = "Meeting scheduled successfully.";
+    pageMessage.className = "alert success";
+    await loadMeetings();
+  } catch (error) {
+    formMessage.textContent = error.message;
+    formMessage.className = "alert error";
+  }
+});
+
+list.addEventListener("click", async event => {
+  const button = event.target.closest("[data-cancel]");
+  if (!button || !confirm("Cancel this meeting?")) return;
+  try {
+    await api(`/api/meetings/${button.dataset.cancel}/cancel/`, {method: "POST", headers: {"X-CSRFToken": csrfToken()}});
+    pageMessage.textContent = "Meeting cancelled.";
+    pageMessage.className = "alert success";
+    await loadMeetings();
+  } catch (error) {
+    pageMessage.textContent = error.message;
+    pageMessage.className = "alert error";
+  }
+});
+
+loadUsers();
+loadMeetings();
+</script>
+{% endblock %}
